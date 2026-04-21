@@ -8,7 +8,7 @@ export default defineConfig(({mode}) => {
   const supabaseOrigin = env.VITE_SUPABASE_URL?.replace(/\/$/, '') ?? '';
 
   return {
-    base: '/',
+    base: '/portfolio-2026/',
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
@@ -20,7 +20,7 @@ export default defineConfig(({mode}) => {
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Proxy: el navegador llama a mismo origen (localhost) y Vite reenvía a Supabase.
       // Evita "Failed to fetch" frecuente en local por CORS, extensiones o políticas de red.

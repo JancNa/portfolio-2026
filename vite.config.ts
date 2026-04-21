@@ -9,7 +9,7 @@ export default defineConfig(({mode}) => {
     (env.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.replace(/\/$/, '') ?? '';
 
   return {
-    base: '/portfolio-2026/',
+    base: '/',
     plugins: [
       {
         name: 'warn-missing-supabase-proxy',
@@ -46,7 +46,7 @@ export default defineConfig(({mode}) => {
               rewrite: (p) => p.replace(/^\/__supabase-functions/, '/functions/v1'),
               configure: (proxy) => {
                 proxy.on('error', (err, req) => {
-                  console.error('[vite proxy → Supabase]', req?.url, err.message);
+                  console.error('[vite proxy \u2192 Supabase]', req?.url, err.message);
                 });
               },
             },

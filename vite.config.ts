@@ -5,11 +5,28 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
-  const supabaseOrigin = env.VITE_SUPABASE_URL?.replace(/\/$/, '') ?? '';
+  const supabaseOrigin =
+    (env.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.replace(/\/$/, '') ?? '';
 
   return {
     base: '/portfolio-2026/',
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      {
+        name: 'warn-missing-supabase-proxy',
+        configureServer(server) {
+          server.httpServer?.once('listening', () => {
+            if (!supabaseOrigin) {
+              console.warn(
+                '\n[vite] VITE_SUPABASE_URL no está definida al arrancar Vite: el proxy /__supabase-functions no se activa. ' +
+                  'Crea un .env en la raíz del proyecto (copia .env.example) o exporta VITE_SUPABASE_URL.\n'
+              );
+            }
+          });
+        },
+      },
+      react(),
+      tailwindcss(),
+    ],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
     },
@@ -19,11 +36,7 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
-      // Proxy: el navegador llama a mismo origen (localhost) y Vite reenvía a Supabase.
-      // Evita "Failed to fetch" frecuente en local por CORS, extensiones o políticas de red.
       proxy: supabaseOrigin
         ? {
             '/__supabase-functions': {
@@ -31,6 +44,11 @@ export default defineConfig(({mode}) => {
               changeOrigin: true,
               secure: true,
               rewrite: (p) => p.replace(/^\/__supabase-functions/, '/functions/v1'),
+              configure: (proxy) => {
+                proxy.on('error', (err, req) => {
+                  console.error('[vite proxy → Supabase]', req?.url, err.message);
+                });
+              },
             },
           }
         : undefined,

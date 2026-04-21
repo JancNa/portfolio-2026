@@ -26,19 +26,28 @@ const envFlags = {
   VITE_CHAT_DIRECT: viteEnv.VITE_CHAT_DIRECT,
 }
 
+const directChatEdgeFunctionUrl = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/chat`
+
 /**
- * URL del POST a la edge function `chat`.
- * En desarrollo usamos ruta relativa + proxy de Vite (vite.config) para mismo origen;
- * así se evita "Failed to fetch" por CORS o políticas del navegador hacia supabase.co.
- * En producción (`vite build`) va directo a Supabase.
- * Forzar URL directa en dev: `VITE_CHAT_DIRECT=1` en `.env`.
+ * Orden de URLs para el POST a la edge function `chat`.
+ * En desarrollo se intenta primero el proxy de Vite; si falla la red, se reintenta la URL directa a Supabase.
+ * Con `VITE_CHAT_DIRECT=1` solo se usa la URL directa.
  */
-function getChatEdgeFunctionUrl(): string {
-  const direct = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/chat`
+function getChatEdgeFunctionUrls(): string[] {
   if (envFlags.DEV && envFlags.VITE_CHAT_DIRECT !== '1' && envFlags.VITE_CHAT_DIRECT !== 'true') {
-    return '/__supabase-functions/chat'
+    return ['/__supabase-functions/chat', directChatEdgeFunctionUrl]
   }
-  return direct
+  return [directChatEdgeFunctionUrl]
+}
+
+function isNetworkFailure(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e)
+  return (
+    msg === 'Failed to fetch' ||
+    msg.includes('NetworkError') ||
+    msg.includes('Load failed') ||
+    (e instanceof TypeError && msg.toLowerCase().includes('fetch'))
+  )
 }
 
 /**
@@ -55,75 +64,89 @@ export async function postChatEdgeFunction(
   },
   timeoutMs: number
 ): Promise<unknown> {
-  const url = getChatEdgeFunctionUrl()
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${supabaseAnonKey}`,
-        apikey: supabaseAnonKey,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      cache: 'no-store',
-    })
+  const urls = getChatEdgeFunctionUrls()
 
-    const text = await res.text()
-
-    if (!res.ok) {
-      let detail = text
-      try {
-        const j = JSON.parse(text) as Record<string, unknown>
-        const err =
-          j.error ?? j.message ?? j.msg ?? j.details
-        if (typeof err === 'string') detail = err
-        else if (err != null && typeof err === 'object' && 'message' in err) {
-          const m = (err as { message?: unknown }).message
-          if (typeof m === 'string') detail = m
-        }
-      } catch {
-        /* usar text */
-      }
-      throw new Error(`Chat ${res.status}: ${detail.slice(0, 800)}`)
-    }
-
-    if (!text.trim()) {
-      throw new Error('Respuesta vacía del servidor (chat)')
-    }
-
+  const postOnce = async (url: string): Promise<unknown> => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      return JSON.parse(text) as unknown
-    } catch {
-      return text
-    }
-  } catch (e: unknown) {
-    if (e instanceof Error && e.name === 'AbortError') {
-      throw new Error('Tiempo de espera agotado al contactar el chat.')
-    }
-    const msg = e instanceof Error ? e.message : String(e)
-    const isNetworkFail =
-      msg === 'Failed to fetch' ||
-      msg.includes('NetworkError') ||
-      msg.includes('Load failed') ||
-      (e instanceof TypeError && msg.toLowerCase().includes('fetch'))
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${supabaseAnonKey}`,
+          apikey: supabaseAnonKey,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+        cache: 'no-store',
+      })
 
-    if (isNetworkFail) {
-      const hint =
-        envFlags.DEV && envFlags.VITE_CHAT_DIRECT === '1'
-          ? ' Estás usando URL directa a Supabase (VITE_CHAT_DIRECT). Prueba sin esa variable para usar el proxy de Vite.'
-          : envFlags.DEV
-            ? ' Si persiste: prueba sin extensiones, otra red, o pon VITE_CHAT_DIRECT=1 en .env para forzar URL directa y ver el error en pestaña Red.'
-            : ' Comprueba que el dominio del sitio pueda llamar a Supabase (CSP connect-src, firewall). Variables VITE_SUPABASE_* correctas en el hosting.'
+      const text = await res.text()
 
-      throw new Error(
-        `Red: no se pudo conectar con la función chat (${msg}).${hint}`
-      )
+      if (!res.ok) {
+        let detail = text
+        try {
+          const j = JSON.parse(text) as Record<string, unknown>
+          const err =
+            j.error ?? j.message ?? j.msg ?? j.details
+          if (typeof err === 'string') detail = err
+          else if (err != null && typeof err === 'object' && 'message' in err) {
+            const m = (err as { message?: unknown }).message
+            if (typeof m === 'string') detail = m
+          }
+        } catch {
+          /* usar text */
+        }
+        throw new Error(`Chat ${res.status}: ${detail.slice(0, 800)}`)
+      }
+
+      if (!text.trim()) {
+        throw new Error('Respuesta vacía del servidor (chat)')
+      }
+
+      try {
+        return JSON.parse(text) as unknown
+      } catch {
+        return text
+      }
+    } finally {
+      clearTimeout(timer)
     }
-    throw e
-  } finally {
-    clearTimeout(timer)
+  }
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i]!
+    try {
+      return await postOnce(url)
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === 'AbortError') {
+        throw new Error('Tiempo de espera agotado al contactar el chat.')
+      }
+
+      if (isNetworkFailure(e)) {
+        const canRetry = i < urls.length - 1
+        if (canRetry && envFlags.DEV) {
+          console.warn(
+            '[chat] Fallo de red con el proxy de Vite; reintentando con la URL directa de Supabase…'
+          )
+          continue
+        }
+
+        const msg = e instanceof Error ? e.message : String(e)
+        const hint =
+          envFlags.DEV && envFlags.VITE_CHAT_DIRECT === '1'
+            ? ' Estás usando URL directa a Supabase (VITE_CHAT_DIRECT). Prueba sin esa variable para usar el proxy de Vite.'
+            : envFlags.DEV
+              ? ' Si persiste: prueba sin extensiones, otra red, o pon VITE_CHAT_DIRECT=1 en .env para forzar URL directa y ver el error en pestaña Red.'
+              : ' Comprueba que el dominio del sitio pueda llamar a Supabase (CSP connect-src, firewall). Variables VITE_SUPABASE_* correctas en el hosting.'
+
+        throw new Error(
+          `Red: no se pudo conectar con la función chat (${msg}).${hint}`
+        )
+      }
+
+      throw e
+    }
   }
 }
